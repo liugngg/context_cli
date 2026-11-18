@@ -1,0 +1,31 @@
+version: 1
+settings:
+  menu_title: 快捷执行
+commands:
+  - id: "video2mp4"
+    name: "视频转 MP4"
+    enabled: true
+    comment: "用 ffmpeg 转码为 H.264 MP4；-crf 23 控制画质，越小越清晰"
+    extensions: ["mp4", "mkv", "avi", "mov", "flv"]
+    executable: "C:/ffmpeg/bin/ffmpeg.exe"
+    arguments: >-
+      -hide_banner -i "{input}" -c:v libx264 -crf 23 -preset medium
+      -c:a aac "{output}"
+    recurse: true
+    output_dir: ""
+    output_name: "{input_name}.mp4"
+    keep_structure: true
+    show_console: true
+
+  - id: "extract_audio"
+    name: "提取音频为 MP3"
+    enabled: false
+    comment: "从视频中提取音轨，输出到源文件目录"
+    extensions: ["mp4", "mkv", "avi", "mov"]
+    executable: "ffmpeg"
+    arguments: '-hide_banner -i "{input}" -vn -c:a libmp3lame -q:a 2 "{output}"'
+    recurse: false
+    output_dir: ""
+    output_name: "{input_name}.mp3"
+    keep_structure: true
+    show_console: true
