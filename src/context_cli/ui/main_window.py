@@ -22,6 +22,19 @@ from .scrollable_frame import ScrollableFrame
 from .test_panel import TestPanel
 
 
+def _set_window_icon(window: tk.Misc) -> None:
+    """窗口与任务栏使用应用图标；打包版取 exe 内嵌图标。"""
+    try:
+        if getattr(sys, "frozen", False):
+            window.iconbitmap(sys.executable)
+            return
+        icon = Path(__file__).resolve().parents[2] / "packaging" / "context_cli.ico"
+        if icon.is_file():
+            window.iconbitmap(str(icon))
+    except tk.TclError:
+        pass
+
+
 class MainWindow:
     def __init__(self, config_file: str | Path | None = None) -> None:
         self.config_file = Path(config_file) if config_file else None
@@ -58,6 +71,7 @@ class MainWindow:
             min(int(980 * self.ui_scale), width),
             min(int(680 * self.ui_scale), height),
         )
+        _set_window_icon(self.root)
 
         style = ttk.Style(self.root)
         try:

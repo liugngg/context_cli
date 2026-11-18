@@ -47,6 +47,27 @@ def resolve_executable(value: str) -> Path:
     raise JobError(f"找不到执行程序: {raw}")
 
 
+def start_direct(executable: str) -> None:
+    """参数为空时用系统默认方式直接启动程序（不传参、不匹配扩展名）。"""
+    raw = (executable or "").strip().strip('"')
+    if not raw:
+        raise JobError("未设置执行程序")
+
+    candidate = Path(raw).expanduser()
+    if candidate.is_file():
+        target = str(candidate.resolve())
+    else:
+        found = shutil.which(raw)
+        if not found:
+            raise JobError(f"找不到执行程序: {raw}")
+        target = found
+
+    try:
+        os.startfile(target)  # noqa: S606 - 预期行为：交给 shell 打开
+    except OSError as exc:
+        raise JobError(f"启动程序失败: {exc}") from exc
+
+
 def collect_inputs(command: Command, input_path: str | Path) -> tuple[list[Path], Path]:
     """返回待处理文件列表与选中的根路径。"""
     root = Path(os.path.abspath(os.path.expanduser(str(input_path))))
@@ -61,25 +82,64 @@ def collect_inputs(command: Command, input_path: str | Path) -> tuple[list[Path]
         return [root], root.parent
 
     if root.is_dir():
-        files: list[Path] = []
-        if command.recurse:
-            for directory, _dirnames, filenames in os.walk(root):
-                for filename in filenames:
-                    candidate = Path(directory) / filename
-                    if command.matches(candidate):
-                        files.append(candidate)
-        else:
-            try:
-                with os.scandir(root) as entries:
-                    for entry in entries:
-                        if entry.is_file() and command.matches(entry.path):
-                            files.append(Path(entry.path))
-            except OSError as exc:
-                raise JobError(f"读取文件夹失败: {root}: {exc}") from exc
-        files.sort(key=lambda item: str(item).lower())
-        return files, root
+        return _scan_directory(command, root)
 
     raise JobError(f"不支持的输入类型: {root}")
+
+
+def collect_inputs_multi(command: Command, paths: list[str]) -> list[Path]:
+    """多选输入：文件按扩展名过滤，目录展开为其中匹配的文件。
+
+    不支持仅目录命令；结果按输入顺序去重，目录内部文件按路径排序。
+    """
+    if command.directories_only:
+        raise JobError("多选执行不支持仅目录命令，请单个选择文件夹")
+
+    files: list[Path] = []
+    seen: set[str] = set()
+    for raw in paths:
+        root = Path(os.path.abspath(os.path.expanduser(raw)))
+        if not root.exists():
+            continue
+        if root.is_file():
+            if command.matches(root):
+                key = os.path.normcase(str(root))
+                if key not in seen:
+                    seen.add(key)
+                    files.append(root)
+            continue
+        if root.is_dir():
+            matched, _source_root = _scan_directory(command, root)
+            for item in matched:
+                key = os.path.normcase(str(item))
+                if key not in seen:
+                    seen.add(key)
+                    files.append(item)
+
+    if not files:
+        raise JobError("所选文件均不匹配命令的扩展名")
+    return files
+
+
+def _scan_directory(command: Command, root: Path) -> tuple[list[Path], Path]:
+    """扫描单个目录中匹配扩展名的文件，返回 (文件列表, 目录)。"""
+    files: list[Path] = []
+    if command.recurse:
+        for directory, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                candidate = Path(directory) / filename
+                if command.matches(candidate):
+                    files.append(candidate)
+    else:
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if entry.is_file() and command.matches(entry.path):
+                        files.append(Path(entry.path))
+        except OSError as exc:
+            raise JobError(f"读取文件夹失败: {root}: {exc}") from exc
+    files.sort(key=lambda item: str(item).lower())
+    return files, root
 
 
 def _validate_output_name(name: str) -> None:
@@ -170,6 +230,49 @@ def plan_jobs(command: Command, input_path: str | Path) -> list[Job]:
     for input_file in files:
         variables, output_dir, output_name, output_path, relative_dir = _expand_output(
             command, input_file, source_root
+        )
+        try:
+            arguments = expand(command.arguments, variables).strip()
+        except VariableError as exc:
+            raise JobError(f"参数变量错误: {exc}") from exc
+
+        command_line = subprocess.list2cmdline([str(executable)])
+        if arguments:
+            command_line = f"{command_line} {arguments}"
+
+        jobs.append(
+            Job(
+                command=command,
+                input_path=input_file,
+                output_dir=output_dir,
+                output_name=output_name,
+                output_path=output_path,
+                variables=variables,
+                executable=executable,
+                command_line=command_line,
+                relative_dir=relative_dir,
+            )
+        )
+
+    return jobs
+
+
+def plan_jobs_multi(command: Command, paths: list[str]) -> list[Job]:
+    """多选文件的任务规划：每个文件一个任务，目录展开为匹配文件。
+
+    source_root 取每个输入文件各自的父目录/所在目录，与单选行为一致。
+    """
+    errors = command.validate()
+    if errors:
+        raise JobError("；".join(errors))
+
+    executable = resolve_executable(command.executable)
+    files = collect_inputs_multi(command, paths)
+
+    jobs: list[Job] = []
+    for input_file in files:
+        variables, output_dir, output_name, output_path, relative_dir = (
+            _expand_output(command, input_file, input_file.parent)
         )
         try:
             arguments = expand(command.arguments, variables).strip()

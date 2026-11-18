@@ -46,10 +46,13 @@
 
 | 主题 | 决策 |
 |---|---|
-| 多选 | 仅支持单选文件/文件夹；`MultiSelectModel=Single` |
+| 多选 | 支持多选文件（`MultiSelectModel=Player` + 互斥体合并）；不支持多选目录 |
 | 输出配置 | 提供 `{output_dir}`、`{output_name}`、`{output}` 变量 |
-| 执行反馈 | 单文件弹控制台看实时输出，失败弹窗；批量用内置进度窗口；全部写日志 |
+| 执行反馈 | 执行前列出待处理文件清单确认；单文件弹控制台看实时输出，失败弹窗；批量用内置进度窗口；全部写日志 |
+| 空参数 | 参数留空时用 `os.startfile` 直接启动执行程序，不匹配扩展名 |
+| 控制台模式 | 单文件 + 显示控制台用 `subprocess.run()` 阻塞执行，输出直接进新控制台 |
 | Win11 菜单 | 接受传统菜单折叠进「显示更多选项」，不做 COM 扩展 |
+| 菜单图标 | 打包 exe 内嵌闪电图标，注册表写 `Icon` 值 |
 | 工作目录 | 子进程 `cwd` 默认为**命令可执行文件所在目录** |
 | 项目管理 | uv（`pyproject.toml` + `uv.lock` + `.python-version`） |
 | 打包 | PyInstaller **onedir + windowed**，产物 `ContextCLI.exe` |
@@ -168,10 +171,10 @@ commands:
 | `name` | string | 必填 | 右键菜单显示名 |
 | `enabled` | bool | `true` | 是否注册到菜单、是否参与执行 |
 | `comment` | string | 空 | 用途与参数说明，仅 GUI 展示 |
-| `extensions` | list[str] | 必填 | 扩展名列表，不带点，大小写不敏感 |
+| `extensions` | list[str] | 必填 | 扩展名列表，不带点，大小写不敏感；留空 = 所有文件 |
 | `executable` | string | 必填 | 完整路径或 PATH 中的命令名 |
-| `arguments` | string | 必填 | 参数模板，必须包含至少一个输入变量 |
-| `recurse` | bool | `false` | 文件夹输入时是否遍历子目录 |
+| `arguments` | string | 必填 | 参数模板；非空时必须包含至少一个输入变量，留空 = 直接启动不传参 |
+| `directories_only` | bool | `false` | 勾选后仅出现在文件夹菜单，不处理单个文件 |
 | `output_dir` | string | 空 | 空 = 源文件目录；可写绝对/相对路径，支持输入变量 |
 | `output_name` | string | `{input_name}_out.{input_ext}` | 输出文件名模板，不支持目录分隔符 |
 | `keep_structure` | bool | `true` | 指定输出目录且递归时保留相对子目录结构 |
@@ -229,10 +232,11 @@ commands:
 HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.mp4\shell\ContextCLI
     MUIVerb          = "快捷执行"
     SubCommands      = ""
-    MultiSelectModel = "Single"
-    └─ shell\vid2mp4
+    MultiSelectModel = "Player"
+    Icon             = "C:\...\ContextCLI.exe,0"
+    └─ shell\0000_vid2mp4
          MUIVerb          = "视频转 MP4"
-         MultiSelectModel = "Single"
+         MultiSelectModel = "Player"
          └─ command
               (默认) = "C:\...\ContextCLI.exe" --run "vid2mp4" "%1"
 ```
@@ -243,14 +247,17 @@ HKEY_CURRENT_USER\Software\Classes\SystemFileAssociations\.mp4\shell\ContextCLI
 HKEY_CURRENT_USER\Software\Classes\Directory\shell\ContextCLI
     MUIVerb          = "快捷执行"
     SubCommands      = ""
-    MultiSelectModel = "Single"
-    └─ shell\<command_id>
+    MultiSelectModel = "Player"
+    Icon             = "C:\...\ContextCLI.exe,0"
+    └─ shell\<index前缀>_<command_id>
          ...
          └─ command
               (默认) = "C:\...\ContextCLI.exe" --run "<id>" "%1"
 ```
 
 - 注册键名固定使用 `ContextCLI`，显示名用 `MUIVerb=快捷执行`，改名不影响注册结构。
+- 子键名用 `{索引:04d}_{命令ID}` 前缀锁定菜单显示顺序与命令列表一致。
+- `MultiSelectModel=Player`：多选文件时资源管理器按文件逐个启动本程序；程序内部用命名互斥体合并同一批启动（首个实例等待收集，其余实例把路径写入 `%APPDATA%\ContextCLI\pending\<命令ID>\` 后退出）。
 - 文件夹没有可静态判断的扩展名，因此列出全部启用命令；Runner 扫描后若无匹配文件，提示“未找到匹配文件”。
 - 任一扩展名没有启用命令时，不创建该扩展名的菜单，实现“不匹配就不出现”。
 - 注册/卸载后调用 `SHChangeNotify(SHCNE_ASSOCCHANGED)` 刷新资源管理器。
@@ -285,15 +292,18 @@ Windows 11 默认把传统注册表菜单折叠到「显示更多选项」（Shi
 4. 最终命令行 = 引号包裹的可执行文件路径 + 空格 + 展开后的参数。
 5. 使用 `subprocess.Popen(command_line, shell=False)`；不解析管道与重定向。
 
-### 10.3 三种执行场景
+### 10.3 执行场景
+
+执行前先用 `MessageBoxW` 列出待处理文件数量与文件名（最多 12 个，超出显示总数），用户确认后才开始。
 
 | 场景 | 输出方式 | 失败反馈 |
 |---|---|---|
-| 单文件 + `show_console=true` | `CREATE_NEW_CONSOLE` 弹出控制台，实时输出 | 弹窗显示退出码与日志路径 |
+| 参数为空 | `os.startfile` 直接启动执行程序，不传参、不匹配扩展名 | 启动失败弹窗 |
+| 单文件 + `show_console=true` | `subprocess.run` + `CREATE_NEW_CONSOLE`，输出直接进新控制台 | 弹窗显示退出码与日志路径 |
 | 单文件 + `show_console=false` | 管道捕获，写日志 | 弹窗显示退出码与日志路径；成功静默 |
-| 文件夹 / 多文件 | 内置 Tk 进度窗口，实时输出、进度、停止按钮 | 汇总成功/失败数量，保留窗口供查看 |
+| 多选文件 / 文件夹 | 内置 Tk 进度窗口：先列完整清单，点「开始执行」后运行，实时输出、进度、停止按钮 | 汇总成功/失败数量，保留窗口供查看 |
 
-- 停止操作使用 `taskkill /PID <pid> /T /F` 结束进程树。
+- 停止操作使用 `taskkill /PID <pid> /T /F` 结束进程树（仅捕获模式需要）。
 - GUI 测试面板始终捕获输出并实时显示，不受 `show_console` 限制。
 - 每次运行生成独立日志：时间、命令、工作目录、最终命令行、输出、退出码、耗时。
 - 日志保留 1 天；每次运行前自动清理过期日志，应用启动时也会清理。
@@ -476,6 +486,7 @@ D:\Git-Project\context_cli\
 - 高 DPI 冒烟：当前 125% 缩放（120 DPI）下窗口 1475×930，行高 30 px > 字体行高 20 px；模拟 150%（144 DPI）时窗口 1770×900，行高 36 px > 行高 24 px；状态栏可见、测试区默认折叠、表单可滚动。
 - 体验调整（2026-11-17）：测试验证的预览与输出区改用可拖动分隔条，预览高度可调；命令列表为空或未选中命令时右侧表单禁用，新建命令后自动启用；日志保留期改为 1 天，每次运行前自动清理过期日志。
 - 体验调整（2026-11-17）：工具栏新增「复制」，基于当前表单创建副本并插入原命令之后；测试面板新增「清空」，一键清除预览与输出。
+- 功能扩展（2026-11-18）：控制台模式改用 `subprocess.run()`；参数为空用 `os.startfile` 直接启动；支持多选文件（互斥体合并，`MultiSelectModel=Player`，73 项测试含 3 进程合并冒烟）；执行前弹窗列出待处理文件清单；右键菜单与 exe 嵌入闪电图标（`packaging/make_icon.py` 生成）。
 - 当前注册状态：`not_registered`；临时测试菜单「快捷执行测试」已清理，无残留。
 - 未完成的人工验收：受自动化环境限制，尚未在资源管理器中实际右键点击菜单；建议发布前手动确认一次菜单显示与执行。
 - 下一步：完成资源管理器人工验收；确认后可发布，或按 §17 继续扩展。

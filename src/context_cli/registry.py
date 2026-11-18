@@ -74,6 +74,16 @@ def build_launch_prefix() -> list[str]:
     return [str(launcher), "-m", "context_cli"]
 
 
+def build_icon_value() -> str:
+    """右键菜单图标的 Icon 值；打包版用 exe 自身，开发模式用仓库内 ico。"""
+    if getattr(sys, "frozen", False):
+        return f"{sys.executable},0"
+    icon = Path(__file__).resolve().parents[2] / "packaging" / "context_cli.ico"
+    if icon.is_file():
+        return f"{icon},0"
+    return f"{sys.executable},0"
+
+
 def build_extension_map(config: AppConfig) -> dict[str, dict[str, Command]]:
     """按注册表扩展名分组，值为 {command_id: Command}。
 
@@ -240,14 +250,18 @@ def _write_menu(
     with _create_key(parent_path) as key:
         _set_sz(key, "MUIVerb", escape_menu_text(title))
         _set_sz(key, "SubCommands", "")
-        _set_sz(key, "MultiSelectModel", "Single")
+        # Player：资源管理器对多选文件按个数启动本程序，由程序内部合并执行。
+        _set_sz(key, "MultiSelectModel", "Player")
+        icon_value = build_icon_value()
+        if icon_value:
+            _set_sz(key, "Icon", icon_value)
 
     shell_path = f"{parent_path}\\shell"
     for index, command in enumerate(commands):
         command_path = f"{shell_path}\\{ordered_menu_key(index, command.id)}"
         with _create_key(command_path) as key:
             _set_sz(key, "MUIVerb", escape_menu_text(command.name))
-            _set_sz(key, "MultiSelectModel", "Single")
+            _set_sz(key, "MultiSelectModel", "Player")
         with _create_key(f"{command_path}\\command") as key:
             _set_sz(key, "", build_command_string(prefix, command.id, "%1"))
 
@@ -338,8 +352,11 @@ def _check_menu(
         problems.append(f"{label}: 菜单标题不匹配")
     if _get_value(path, "SubCommands") != "":
         problems.append(f"{label}: SubCommands 设置不正确")
-    if _get_value(path, "MultiSelectModel") != "Single":
+    if _get_value(path, "MultiSelectModel") != "Player":
         problems.append(f"{label}: MultiSelectModel 设置不正确")
+    icon_value = build_icon_value()
+    if icon_value and _get_value(path, "Icon") != icon_value:
+        problems.append(f"{label}: 菜单图标不匹配")
 
     shell_path = f"{path}\\shell"
     actual = set(_list_subkeys(shell_path))

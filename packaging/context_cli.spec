@@ -26,6 +26,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="ContextCLI",
+    icon=str(project_root / "packaging" / "context_cli.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -6,6 +6,7 @@ import locale
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -162,6 +163,97 @@ def _write_log(handle: TextIO | None, text: str) -> None:
         pass
 
 
+def _build_console_bat(jobs: list[Job]) -> Path:
+    """生成临时 .bat，逐个执行 jobs，末尾 pause 等待用户按键关闭。
+
+    命令行与中文提示均通过 env var 注入，bat 文件本身纯 ASCII，
+    彻底回避系统 GBK/UTF-8 编码问题。
+    """
+    lines = ["@echo off", "chcp 65001 >nul 2>&1", ""]
+    for index, job in enumerate(jobs):
+        lines.append(f"cd /d %__CTX_CWD_{index}%")
+        lines.append(f"echo [{index + 1}/{len(jobs)}] %__CTX_LABEL_{index}%")
+        lines.append(f"%__CTX_LINE_{index}%")
+        lines.append("")
+    lines += [
+        "echo.",
+        "echo %__CTX_DONE_MSG%",
+        "pause >nul",
+        "exit /b 0",
+    ]
+    fd, path = tempfile.mkstemp(suffix=".bat", prefix="ctx_run_")
+    try:
+        os.write(fd, "\r\n".join(lines).encode("ascii"))
+    finally:
+        os.close(fd)
+    return Path(path)
+
+
+def run_jobs_console_window(jobs: list[Job]) -> BatchResult:
+    """以新控制台窗口运行所有 jobs，结束后 pause 等待用户按键。
+
+    不捕获输出（回避管道编码问题）；log_path 写元数据供事后排查。
+    """
+    cleanup_old_logs()
+    log_path = create_log_path(jobs[0].command.name, jobs[0].command.id) if jobs else None
+    batch = BatchResult(log_path=log_path)
+    if not jobs:
+        return batch
+
+    if log_path:
+        with open(log_path, "a", encoding="utf-8") as lh:
+            _write_log(lh, "=" * 64)
+            _write_log(lh, f"运行开始: {datetime.now():%Y-%m-%d %H:%M:%S}")
+            _write_log(lh, f"命令: {jobs[0].command.name} ({jobs[0].command.id})")
+            _write_log(lh, f"任务数: {len(jobs)}  模式: 控制台（新窗口）")
+            _write_log(lh, "=" * 64)
+            for index, job in enumerate(jobs, start=1):
+                _write_log(lh, f"[{index}/{len(jobs)}] {job.input_path}")
+                _write_log(lh, f"  命令行: {job.command_line}")
+
+    if os.name != "nt":
+        for job in jobs:
+            result = run_job(job, capture=False)
+            batch.results.append(result)
+        return batch
+
+    bat = _build_console_bat(jobs)
+    env = os.environ.copy()
+    for index, job in enumerate(jobs):
+        env[f"__CTX_CWD_{index}"] = str(job.executable.parent)
+        env[f"__CTX_LABEL_{index}"] = job.input_path.name
+        env[f"__CTX_LINE_{index}"] = job.command_line
+    env["__CTX_DONE_MSG"] = "全部完成，按任意键关闭此窗口…"
+
+    started = time.monotonic()
+    try:
+        subprocess.run(
+            [str(bat)],
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            check=False,
+        )
+    except (OSError, ValueError) as exc:
+        for job in jobs:
+            batch.results.append(
+                RunResult(job=job, error=f"启动失败: {exc}",
+                          duration=time.monotonic() - started)
+            )
+        return batch
+    finally:
+        try:
+            bat.unlink()
+        except OSError:
+            pass
+
+    # bat 整体阻塞运行完后返回；无法拿到每个 job 的退出码，
+    # 用户已在控制台窗口看到输出，统一标记 exit_code=0。
+    duration = time.monotonic() - started
+    for job in jobs:
+        batch.results.append(RunResult(job=job, exit_code=0, duration=duration))
+    return batch
+
+
 def run_job(
     job: Job,
     *,
@@ -180,6 +272,31 @@ def run_job(
         result.duration = time.monotonic() - started
         return result
 
+    # 控制台模式：subprocess.run() 阻塞运行，子进程输出直接实时显示在
+    # 新开的控制台窗口里，不经过管道，兼容任意编码的子进程输出。
+    # 通过 _build_console_bat / run_jobs_console_window 调用时不走此分支；
+    # 此处保留用于 GUI 测试面板手动触发的单文件控制台路径。
+    if not capture and stop_event is None:
+        try:
+            completed = subprocess.run(
+                job.command_line,
+                cwd=str(job.executable.parent),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    if os.name == "nt"
+                    else 0
+                ),
+                check=False,
+            )
+        except (OSError, ValueError) as exc:
+            result.error = f"启动进程失败: {exc}"
+            result.duration = time.monotonic() - started
+            return result
+        result.exit_code = completed.returncode
+        result.duration = time.monotonic() - started
+        return result
+
+    # 捕获模式（测试面板 / 批量进度窗口）：Popen 管道流式读取并支持停止。
     creationflags = 0
     if os.name == "nt":
         creationflags = (

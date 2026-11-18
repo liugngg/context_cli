@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from context_cli.jobs import JobError, plan_jobs, resolve_executable
+from context_cli.jobs import (
+    JobError,
+    plan_jobs,
+    plan_jobs_multi,
+    resolve_executable,
+)
 from context_cli.models import Command
 
 
@@ -158,3 +163,52 @@ def test_empty_arguments_allowed(tmp_path):
     root = make_tree(tmp_path)
     jobs = plan_jobs(make_command(arguments=""), root / "a.mp4")
     assert jobs[0].command_line == subprocess.list2cmdline([str(jobs[0].executable)])
+
+
+def test_plan_jobs_multi_filters_and_deduplicates(tmp_path):
+    root = make_tree(tmp_path)
+    jobs = plan_jobs_multi(
+        make_command(),
+        [str(root / "a.mp4"), str(root / "c.txt"), str(root / "a.mp4")],
+    )
+    # c.txt 不匹配扩展名被过滤；a.mp4 重复选择只保留一个。
+    assert [job.input_path.name for job in jobs] == ["a.mp4"]
+
+
+def test_plan_jobs_multi_expands_directories(tmp_path):
+    root = make_tree(tmp_path)
+    jobs = plan_jobs_multi(make_command(recurse=True), [str(root)])
+    # 目录输入展开为其中匹配的文件；不支持仅目录。
+    assert [job.input_path.name for job in jobs] == ["a.mp4", "b.MP4", "d.mp4"]
+
+
+def test_plan_jobs_multi_rejects_directories_only(tmp_path):
+    root = make_tree(tmp_path)
+    with pytest.raises(JobError, match="仅目录"):
+        plan_jobs_multi(make_command(directories_only=True), [str(root / "a.mp4")])
+
+
+def test_plan_jobs_multi_all_mismatched_raises(tmp_path):
+    root = make_tree(tmp_path)
+    with pytest.raises(JobError, match="不匹配"):
+        plan_jobs_multi(make_command(), [str(root / "c.txt")])
+
+
+def test_plan_jobs_multi_order_follows_input(tmp_path):
+    root = make_tree(tmp_path)
+    jobs = plan_jobs_multi(
+        make_command(extensions=[]),
+        [str(root / "c.txt"), str(root / "a.mp4")],
+    )
+    assert [job.input_path.name for job in jobs] == ["c.txt", "a.mp4"]
+
+
+def test_start_direct_launches_executable(monkeypatch):
+    launched = {}
+    monkeypatch.setattr(
+        "context_cli.jobs.os.startfile", lambda target: launched.update(target=target)
+    )
+    from context_cli.jobs import start_direct
+
+    start_direct(sys.executable)
+    assert launched["target"].lower().endswith("python.exe")

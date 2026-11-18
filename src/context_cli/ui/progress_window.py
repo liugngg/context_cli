@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 from ..dpi import configure_tk_scaling, set_process_dpi_awareness
 from ..jobs import Job
 from ..runner import BatchResult, run_jobs
+from .main_window import _set_window_icon
 from .text_utils import append_readonly_text
 
 
@@ -29,6 +30,7 @@ class ProgressWindow:
         self.root = tk.Tk()
         self.ui_scale = configure_tk_scaling(self.root)
         self.root.title("快捷执行 - 正在处理")
+        _set_window_icon(self.root)
 
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
@@ -68,8 +70,13 @@ class ProgressWindow:
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
 
+        # 启动前先列出待处理文件的数量与文件名，确认后才执行。
+        names = [job.input_path.name for job in self.jobs]
+        preview = "、".join(names[:12])
+        if len(names) > 12:
+            preview += f" … 等共 {len(names)} 个"
         self.header_var = tk.StringVar(
-            value=f"{command_name}：0/{self._total}"
+            value=f"{command_name}：待处理 {self._total} 个文件"
         )
         ttk.Label(
             header,
@@ -125,6 +132,14 @@ class ProgressWindow:
             xscrollcommand=x_scroll.set,
         )
 
+        # 执行前弹出过确认框，这里直接列出完整清单后开始运行。
+        listing = [f"待处理文件：共 {self._total} 个", ""]
+        listing.extend(
+            f"{index:>4}. {job.input_path.name}"
+            for index, job in enumerate(self.jobs, start=1)
+        )
+        append_readonly_text(self.output_text, "\n".join(listing))
+
         footer = ttk.Frame(
             self.root,
             padding=(
@@ -135,14 +150,16 @@ class ProgressWindow:
             ),
         )
         footer.grid(row=3, column=0, sticky="ew")
-        self.status_label = ttk.Label(footer, text="准备运行…")
+        self.status_label = ttk.Label(footer, text="运行中…")
         self.status_label.pack(side="left")
 
         self.close_button = ttk.Button(
             footer, text="关闭", command=self._on_close, state="disabled"
         )
         self.close_button.pack(side="right")
-        self.stop_button = ttk.Button(footer, text="停止", command=self.stop)
+        self.stop_button = ttk.Button(
+            footer, text="停止", command=self.stop
+        )
         self.stop_button.pack(side="right", padx=(0, int(6 * scale)))
 
     def run(self) -> BatchResult | None:
